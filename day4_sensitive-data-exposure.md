@@ -1,0 +1,283 @@
+# Sensitive Data Exposure — Complete Bug Bounty Cheatsheet
+
+> **OWASP:** A04:2025 — Cryptographic Failures / Data Exposure  
+> **Severity:** High — leads to data breach, credential theft, compliance violations  
+> **Impact:** PII leak, financial data exposure, full system compromise
+
+---
+
+## What is Sensitive Data Exposure?
+
+Applications fail to protect sensitive data — passwords, credit card numbers, health records, API keys, tokens — either in **transit** (over the network) or **at rest** (in storage, code, logs).
+
+**43% of all breaches** involve exposed credentials. This is one of the easiest bug classes to find yet massively impactful.
+
+---
+
+## 6 Exposure Vectors
+
+### 1. Hardcoded Secrets in Source Code
+API keys, passwords, tokens committed directly in code or config files.
+
+```bash
+# Manual search in JS files
+grep -r "api_key\|secret\|password\|token\|aws_access\|private_key" *.js
+
+# Git history search
+git log --all --full-history -- "*.env"
+git show <commit>:.env
+
+# Tools
+trufflehog git https://github.com/target/repo
+gitleaks detect --source /path/to/repo
+
+# Common files to check
+.env
+.env.local
+.env.production
+config.php
+settings.py
+application.properties
+appsettings.json
+```
+
+---
+
+### 2. Sensitive Data in URLs
+PII, tokens, passwords passed as GET parameters — logged everywhere.
+
+```
+What to look for:
+GET /reset-password?token=eyJhbGciOiJIUzI1NiJ9&email=user@corp.com
+GET /api/login?username=admin&password=secret123
+GET /export?ssn=123-45-6789
+
+Why it's dangerous:
+- Stored in browser history
+- Logged in server access logs
+- Sent in Referer header to third parties
+- Visible in network monitoring tools
+
+Test:
+1. Intercept all GET requests in Burp
+2. Look for tokens, passwords, emails, IDs in URL params
+3. Check Referer header on external links
+```
+
+---
+
+### 3. Unencrypted Sensitive Data
+PII, credentials, financial data sent over HTTP or stored in plaintext.
+
+```bash
+# Test HTTP → HTTPS redirect
+curl -I http://target.com/login
+curl -I http://target.com/checkout
+curl -I http://target.com/api/users
+
+# Check TLS version
+nmap --script ssl-enum-ciphers -p 443 target.com
+testssl.sh target.com
+
+# Cookie flags check
+# Look for: Secure flag missing on sensitive cookies
+# If Secure flag absent → cookie sent over HTTP too
+
+# Check SSL Labs
+https://www.ssllabs.com/ssltest/analyze.html?d=target.com
+```
+
+---
+
+### 4. Verbose Error Messages
+Stack traces, SQL queries, file paths leaked in error responses.
+
+```
+Payloads to trigger errors:
+- Send null: param=null
+- Send array: param[]=value
+- Send special chars: param=' " ; < > &
+- Send very long string: param=AAAA....(10000 chars)
+- Send wrong type: numeric field → send string
+- Send negative numbers: id=-1
+- Access non-existent: /api/users/99999999
+
+What to look for in responses:
+- Stack traces (Exception in thread...)
+- SQL query syntax errors
+- File system paths (/var/www/html/...)
+- Database names and table names
+- Framework versions (PHP 7.4.3, Laravel 8.x)
+- Internal IP addresses
+```
+
+---
+
+### 5. Exposed Backup & Config Files
+Database dumps, config files, backups left publicly accessible.
+
+```bash
+# Common sensitive paths to fuzz
+/.env
+/.env.backup
+/.env.local
+/.git/config
+/.git/HEAD
+/phpinfo.php
+/info.php
+/backup.zip
+/backup.sql
+/db.sql
+/database.sql
+/config.php
+/wp-config.php
+/web.config
+/appsettings.json
+/.DS_Store
+/robots.txt          ← often reveals hidden paths
+
+# Tools
+ffuf -u https://target.com/FUZZ -w /usr/share/wordlists/dirb/common.txt
+dirsearch -u https://target.com -e php,sql,zip,bak,config
+nuclei -u https://target.com -t exposures/
+
+# Git exposure
+curl https://target.com/.git/config
+git-dumper https://target.com/.git /tmp/target-git
+```
+
+---
+
+### 6. Sensitive Data in API Responses
+APIs returning more data than the UI displays — over-fetching.
+
+```
+Test methodology:
+1. Open browser DevTools → Network tab
+2. Perform normal actions (view profile, list users)
+3. Compare what UI shows vs raw API response
+4. Look for hidden fields in JSON:
+   - password_hash
+   - ssn / national_id
+   - credit_card_number
+   - api_key / secret_token
+   - internal_notes
+   - admin_flag: true
+
+Example finding:
+GET /api/v1/users/me
+Response: {
+  "name": "John",
+  "email": "john@example.com",
+  "password": "$2a$10$...",      ← password hash exposed!
+  "ssn": "123-45-6789",          ← PII exposed!
+  "api_key": "sk-live-abc123"    ← secret key exposed!
+}
+```
+
+---
+
+## Complete Hunter Checklist
+
+```
+SOURCE CODE & REPOS
+☐ Search JS files for hardcoded secrets (api_key, token, password)
+☐ Check GitHub for public repos of target
+☐ Run trufflehog / gitleaks on any accessible repos
+☐ Check .git folder: curl target.com/.git/config
+
+TRANSPORT SECURITY
+☐ Test all sensitive pages over HTTP (login, checkout, API)
+☐ Check all cookies for Secure and HttpOnly flags
+☐ Test TLS version with nmap or testssl.sh
+☐ Check mixed content (HTTPS page loading HTTP resources)
+
+ERROR HANDLING
+☐ Send malformed input to all endpoints
+☐ Check 400, 403, 404, 500 responses for stack traces
+☐ Look for DB errors, file paths, version disclosure
+
+FILE EXPOSURE
+☐ Fuzz for .env, .git, backup files with ffuf/dirsearch
+☐ Check /robots.txt for hidden directories
+☐ Test common config file paths
+
+API RESPONSES
+☐ Compare UI display vs raw API response
+☐ Look for over-fetching — extra sensitive fields
+☐ Test unauthenticated endpoints for data leakage
+```
+
+---
+
+## Bug Bounty Report Template
+
+```
+Title: Hardcoded AWS Secret Key in Public JavaScript Bundle
+
+Severity: Critical (CVSS 9.1)
+
+Endpoint: https://target.com/static/js/main.chunk.js
+
+Issue:
+AWS secret access key found hardcoded in the application's
+public JavaScript bundle, allowing any user to access
+the company's AWS infrastructure.
+
+Evidence:
+AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+Region: us-east-1
+
+Steps to Reproduce:
+1. Navigate to https://target.com
+2. Open DevTools → Sources → main.chunk.js
+3. Search for "AWS_SECRET" or "AKIA"
+4. Key found at line 4821
+
+Impact:
+Full access to AWS S3 buckets, EC2 instances, RDS databases.
+Potential for data exfiltration, service disruption, and
+significant financial damage via AWS resource abuse.
+
+Remediation:
+- Immediately rotate the exposed credentials
+- Remove secrets from source code
+- Use environment variables and secrets managers (AWS Secrets Manager, Vault)
+- Add pre-commit hooks to prevent future secret commits
+```
+
+---
+
+## Tools Reference
+
+| Tool | Purpose |
+|------|---------|
+| trufflehog | Find secrets in git history |
+| gitleaks | Scan repos for hardcoded secrets |
+| ffuf | Fuzz for exposed files and directories |
+| dirsearch | Directory and file enumeration |
+| nuclei | Automated exposure detection templates |
+| testssl.sh | TLS/SSL configuration testing |
+| Burp Suite | Intercept and analyze API responses |
+
+---
+
+## Practice Labs
+
+- [PortSwigger Information Disclosure Labs](https://portswigger.net/web-security/information-disclosure)
+- [TryHackMe — Secret Recipe](https://tryhackme.com)
+- [HackTheBox — JS challenges](https://hackthebox.com)
+
+---
+
+## Key Takeaway
+
+> Sensitive data exposure is often **accidental** — developers forget to remove keys,
+> disable verbose errors, or secure config files.
+> Your job as a hunter: **look where developers don't think to look.**
+> One `.env` file = game over for the entire application.
+
+---
+
+*Daily Bug Bounty notes, cheatsheets & payloads — follow along.*
